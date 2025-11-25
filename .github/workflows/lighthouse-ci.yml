@@ -5,6 +5,7 @@ permissions:
   issues: write
 
 on:
+  workflow_call:
   push:
     branches: [master]
 
