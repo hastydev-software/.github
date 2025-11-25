@@ -48,6 +48,10 @@ on:
   push:
     branches: [ main, master ]
 
+permissions:
+  contents: read
+  issues: write
+
 jobs:
   lighthouse:
     uses: hastydev-software/.github/.github/workflows/lighthouse-ci.yml@main
