@@ -1,0 +1,253 @@
+name: Lighthouse CI
+
+permissions:
+  contents: read
+  issues: write
+
+on:
+  push:
+    branches: [master]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lighthouse:
+    runs-on: [self-hosted, linux]
+    env:
+      NODE_ENV: test
+      NEXT_PUBLIC_APP_URL: http://localhost:3000
+      API_KEY: ${{ secrets.API_KEY }}
+      BACKEND_URL: ${{ secrets.BACKEND_URL }}
+      NEXT_PUBLIC_LOGMANAGER_URL: ${{ secrets.NEXT_PUBLIC_LOGMANAGER_URL }}
+      TOKEN_SIGNATURE_SECRET: ${{ secrets.TOKEN_SIGNATURE_SECRET }}
+      ENABLE_TEST_AUTH: true
+      TEST_EMAIL: ${{ secrets.TEST_EMAIL }}
+      TEST_PASSWORD: ${{ secrets.TEST_PASSWORD }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build (Next.js production)
+        run: npm run build
+
+      - name: Start server & run Lighthouse CI
+        env:
+          PORT: 3000
+          LHCI_BASE_URL: http://localhost:3000
+        run: |
+          echo "Preparing .lighthouseci dir and starting using: npm run start"
+          mkdir -p .lighthouseci
+          npx start-server-and-test "npm run start" http://localhost:3000 "npx lhci autorun --config=.lighthouserc.json --upload.target=filesystem"
+
+      - name: Log .lighthouseci contents
+        run: |
+          echo "Listing files in .lighthouseci (if present):"
+          if [ -d .lighthouseci ]; then
+            find .lighthouseci -type f -maxdepth 4 -print || true
+          else
+            echo "No .lighthouseci directory found"
+          fi
+
+      - name: Create GitHub issue if Lighthouse scores are below thresholds
+        if: always()
+        uses: actions/github-script@v6
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+
+            function findReportFiles() {
+              const base = path.join(process.cwd(), '.lighthouseci');
+              if (!fs.existsSync(base)) return [];
+              const results = [];
+              const walk = (dir, depth = 0) => {
+                if (depth > 6) return;
+                for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+                  const full = path.join(dir, entry.name);
+                  try {
+                    if (entry.isDirectory()) {
+                      if (full.includes('node_modules')) continue;
+                      walk(full, depth + 1);
+                    } else {
+                      const lower = entry.name.toLowerCase();
+                      if (lower.endsWith('.json') || lower.endsWith('.html')) results.push(full);
+                    }
+                  } catch {}
+                }
+              };
+              walk(base);
+              return results;
+            }
+
+            const candidates = findReportFiles();
+            if (candidates.length === 0) {
+              console.log('No Lighthouse files found, skipping.');
+              return;
+            }
+
+            const assertionFile = candidates.find(f => path.basename(f) === 'assertion-results.json');
+            const lhrFiles = candidates.filter(f => /lhr-\d+\.json$/i.test(path.basename(f)));
+            const htmlFiles = candidates.filter(f => f.toLowerCase().endsWith('.html'));
+
+            let chosenLhr = null;
+            if (lhrFiles.length) {
+              const ordered = lhrFiles.map(f => ({ f, t: fs.statSync(f).mtimeMs })).sort((a,b) => b.t - a.t);
+              for (const { f } of ordered) {
+                try {
+                  const raw = fs.readFileSync(f, 'utf8');
+                  const parsed = JSON.parse(raw);
+                  const source = parsed.categories ? parsed : (parsed.lhr || parsed[0] || parsed);
+                  if (source.categories) {
+                    chosenLhr = { file: f, data: parsed };
+                    console.log('Using LHR file:', f);
+                    break;
+                  }
+                } catch {}
+              }
+            }
+
+            if (!chosenLhr) {
+              for (const file of candidates) {
+                if (!file.toLowerCase().endsWith('.json')) continue;
+                if (path.basename(file) === 'assertion-results.json') continue;
+                try {
+                  const raw = fs.readFileSync(file, 'utf8');
+                  const parsed = JSON.parse(raw);
+                  const source = parsed.categories ? parsed : (parsed.lhr || parsed[0] || parsed);
+                  if (source.categories) {
+                    chosenLhr = { file, data: parsed };
+                    console.log('Fallback using categories file:', file);
+                    break;
+                  }
+                } catch {}
+              }
+            }
+
+            const thresholds = { performance: 90, accessibility: 90, 'best-practices': 90, seo: 90 };
+            let categoryFailures = [];
+            let categoryScores = {};
+            if (chosenLhr) {
+              const auditsSource = chosenLhr.data.categories ? chosenLhr.data : (chosenLhr.data.lhr || chosenLhr.data[0] || chosenLhr.data);
+              const categories = auditsSource.categories || (auditsSource.lhr && auditsSource.lhr.categories) || {};
+              const getScore = (cat) => {
+                if (!categories[cat]) return null;
+                const val = categories[cat].score;
+                return typeof val === 'number' ? Math.round(val * 100) : val;
+              };
+              for (const key of Object.keys(thresholds)) {
+                const score = getScore(key);
+                if (score !== null) categoryScores[key] = score;
+                if (score !== null && score < thresholds[key]) categoryFailures.push({ key, score, threshold: thresholds[key] });
+              }
+            }
+
+            let assertionFailures = [];
+            let assertionWarnings = [];
+            if (assertionFile && fs.existsSync(assertionFile)) {
+              try {
+                const raw = fs.readFileSync(assertionFile, 'utf8');
+                const parsed = JSON.parse(raw);
+                const list = parsed.assertionResults || parsed;
+                if (Array.isArray(list)) {
+                  for (const a of list) {
+                    const status = a.status || a.level;
+                    if (status === 'fail' || a.level === 'error') {
+                      assertionFailures.push({ id: a.id, expected: a.expected, actual: a.actual, operator: a.operator });
+                    } else if (a.level === 'warn') {
+                      assertionWarnings.push({ id: a.id, expected: a.expected, actual: a.actual, operator: a.operator });
+                    }
+                  }
+                }
+              } catch (e) {
+                console.log('Failed to parse assertions:', e.message);
+              }
+            }
+
+            const needIssue = categoryFailures.length > 0 || assertionFailures.length > 0;
+            if (!needIssue) {
+              console.log('No failing categories or assertions.');
+              if (assertionWarnings.length) console.log(`Assertion warnings: ${assertionWarnings.map(w => w.id).join(', ')}`);
+              return;
+            }
+
+            const bodyLines = [];
+            bodyLines.push('Automated Lighthouse CI detected regressions.');
+            bodyLines.push('');
+            bodyLines.push('Category Thresholds:');
+            for (const k of Object.keys(thresholds)) {
+              const sc = categoryScores[k];
+              bodyLines.push(`- ${k}: threshold ${thresholds[k]}${sc !== undefined ? `, score ${sc}` : ''}`);
+            }
+            bodyLines.push('');
+            if (categoryFailures.length) {
+              bodyLines.push('Failing Categories:');
+              for (const f of categoryFailures) bodyLines.push(`- ${f.key}: ${f.score} (threshold ${f.threshold})`);
+              bodyLines.push('');
+            }
+            if (assertionFailures.length) {
+              bodyLines.push('Failing Assertions:');
+              for (const a of assertionFailures) bodyLines.push(`- ${a.id}: expected ${a.operator || ''} ${a.expected}, actual ${a.actual}`);
+              bodyLines.push('');
+            }
+            if (assertionWarnings.length) {
+              bodyLines.push('Warnings (informational):');
+              for (const w of assertionWarnings) bodyLines.push(`- ${w.id}: expected ${w.operator || ''} ${w.expected}, actual ${w.actual}`);
+              bodyLines.push('');
+            }
+            bodyLines.push('Artifacts saved under .lighthouseci in this run.');
+
+            const titleParts = [];
+            if (categoryFailures.length) titleParts.push('Categories');
+            if (assertionFailures.length) titleParts.push('Assertions');
+            const title = `Lighthouse: ${titleParts.join('+')} regressions detected`;
+
+            const { data: issues } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'lighthouse'
+            });
+            if (issues.find(i => i.title === title)) {
+              console.log('Duplicate issue detected, skipping creation.');
+              return;
+            }
+
+            const runUrl = `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            bodyLines.push(`[View full Lighthouse reports in workflow artifacts](${runUrl})`);
+            
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title,
+              body: bodyLines.join('\\n'),
+              labels: ['lighthouse']
+            });
+
+      - name: Verify Lighthouse results before upload
+        if: always()
+        run: |
+          echo "Verifying .lighthouseci contents before artifact upload:";
+          if [ -d .lighthouseci ]; then
+            find .lighthouseci -type f -maxdepth 4 -print || true
+          else
+            echo "Directory .lighthouseci missing"
+          fi
+      - name: Upload Lighthouse results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lhci-results
+          path: ./.lighthouseci/**
+          retention-days: 14
