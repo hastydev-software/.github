@@ -41,6 +41,18 @@ jobs:
           ref: ${{ github.ref_name }}
           fetch-depth: 0
 
+      - name: Diagnose Docker permissions
+        run: |
+          echo "🔍 Diagnóstico de permissões Docker:"
+          echo "User: $(whoami)"
+          echo "UID: $(id -u)"
+          echo "GID: $(id -g)"
+          echo "Groups: $(id -Gn)"
+          echo "Docker socket:"
+          ls -la /var/run/docker.sock || echo "Socket não encontrado"
+          echo "Teste de acesso:"
+          docker ps 2>&1 | head -5 || echo "❌ Sem acesso ao Docker"
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
         with:
