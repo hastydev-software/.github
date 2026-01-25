@@ -20,6 +20,17 @@ Executa análise de performance com Lighthouse CI:
 -  Verificação de assertions customizadas
 -  Retenção de artefatos por 14 dias
 
+### 3. Docker Build & Auto Deploy (`docker-build-deploy.yml`)
+Workflow completo de CI/CD para deploy automático no Kubernetes:
+-  Build de imagem Docker
+-  Push para Harbor (registry privado)
+-  Versionamento automático baseado em `package.json`
+-  Atualização automática de manifests Kubernetes
+-  Commit e push automático no repositório de Kubernetes
+-  Deploy automático via Argo CD
+-  Suporte a staging e production baseado na branch
+-  Tags de imagem: `{version}-{branch}-{sha}`
+
 ##  Como Usar nos Seus Projetos
 
 ### Integrar E2E Tests
@@ -58,6 +69,34 @@ jobs:
     secrets: inherit
 ```
 
+### Integrar Docker Build & Auto Deploy
+
+```yaml
+name: Docker Build & Auto Deploy
+
+on:
+  push:
+    branches: [main, master, staging]
+    paths:
+      - 'src/**'
+      - 'package.json'
+      - 'Dockerfile'
+      - '.github/workflows/docker-build-deploy.yml'
+  workflow_dispatch:
+
+jobs:
+  build-and-deploy:
+    uses: hastydev-software/.github/.github/workflows/docker-build-deploy.yml@main
+    with:
+      # Nome da imagem no Harbor
+      image_name: library/seu-projeto
+      # Repositório de Kubernetes (formato: owner/repo)
+      kubernetes_repo: hastydev/hastydev-kubernetes
+      # Caminho do manifest dentro do repositório de Kubernetes
+      manifest_path: manifests/backend/seu-projeto/deployment.yaml
+    secrets: inherit
+```
+
 ## Secrets Necessários
 
 Os seguintes secrets devem ser configurados no repositório que utiliza os workflows:
@@ -74,6 +113,11 @@ Os seguintes secrets devem ser configurados no repositório que utiliza os workf
 - Mesmos secrets do E2E Tests
 - `GITHUB_TOKEN` - Fornecido automaticamente pelo GitHub Actions
 
+### Para Docker Build & Auto Deploy:
+- `HARBOR_USERNAME` - Usuário do Harbor
+- `HARBOR_PASSWORD` - Senha do Harbor
+- `KUBERNETES_REPO_TOKEN` - Token do GitHub com acesso ao repositório de Kubernetes
+
 ##  Requisitos do Projeto
 
 Para que os workflows funcionem corretamente, seu projeto deve ter:
@@ -88,6 +132,12 @@ Para que os workflows funcionem corretamente, seu projeto deve ter:
 ### Para Lighthouse CI:
 - Arquivo `.lighthouserc.json` na raiz do projeto
 - Mesmos requisitos do E2E Tests
+
+### Para Docker Build & Auto Deploy:
+- `Dockerfile` na raiz do projeto
+- `package.json` com campo `version` (ex: `"version": "1.0.0"`)
+- Manifest Kubernetes criado no repositório `hastydev-kubernetes`
+- Argo CD Application configurado para monitorar o manifest
 
 ## Exemplo de Configuração do Lighthouse
 
@@ -133,3 +183,8 @@ runs-on: [self-hosted, linux]
 - Artefatos do Lighthouse são mantidos por 14 dias
 - Issues são criadas automaticamente quando métricas do Lighthouse falham
 - Ambos workflows usam cache para otimizar o tempo de execução
+- O workflow de Docker Build & Auto Deploy:
+  - Deploy automático para `staging` quando há push na branch `staging`
+  - Deploy automático para `production` quando há push na branch `main` ou `master`
+  - Cada deploy gera um commit automático no repositório de Kubernetes
+  - Argo CD detecta o commit e faz deploy automaticamente (GitOps)

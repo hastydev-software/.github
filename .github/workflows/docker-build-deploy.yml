@@ -1,0 +1,187 @@
+name: Docker Build & Auto Deploy
+
+on:
+  workflow_call:
+    inputs:
+      image_name:
+        description: 'Nome da imagem no Harbor (ex: library/hastydev-api-example)'
+        required: true
+        type: string
+      kubernetes_repo:
+        description: 'Repositório de Kubernetes (formato: owner/repo)'
+        required: true
+        type: string
+      manifest_path:
+        description: 'Caminho do manifest dentro do repositório de Kubernetes'
+        required: true
+        type: string
+
+env:
+  REGISTRY: docker.hastydev.com.br
+
+jobs:
+  build-and-deploy:
+    runs-on: self-hosted
+    permissions:
+      contents: write
+      pull-requests: write
+    
+    steps:
+      - name: Checkout application code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Checkout Kubernetes manifests repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.kubernetes_repo }}
+          path: kubernetes-manifests
+          token: ${{ secrets.KUBERNETES_REPO_TOKEN }}
+          ref: ${{ github.ref_name }}
+          fetch-depth: 0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Harbor
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.HARBOR_USERNAME }}
+          password: ${{ secrets.HARBOR_PASSWORD }}
+
+      - name: Get version from package.json
+        id: version
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "📦 Version: $VERSION"
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ inputs.image_name }}
+          tags: |
+            type=raw,value=${{ steps.version.outputs.version }}-${{ github.ref_name }}-${{ github.sha }}
+            type=raw,value=${{ steps.version.outputs.version }}-${{ github.ref_name }}
+            type=raw,value=${{ steps.version.outputs.version }}
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          dockerfile: ./Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ inputs.image_name }}:buildcache
+          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ inputs.image_name }}:buildcache,mode=max
+
+      - name: Determine environment
+        id: env
+        run: |
+          # Determina ambiente baseado na branch
+          if [[ "${{ github.ref_name }}" == "main" ]] || [[ "${{ github.ref_name }}" == "master" ]]; then
+            ENV="production"
+          elif [[ "${{ github.ref_name }}" == "staging" ]]; then
+            ENV="staging"
+          else
+            ENV="staging"  # Default para staging em outras branches
+          fi
+          echo "environment=$ENV" >> $GITHUB_OUTPUT
+          echo "namespace=$ENV" >> $GITHUB_OUTPUT
+          echo "🌍 Environment: $ENV"
+          echo "📦 Namespace: $ENV"
+
+      - name: Get image tag
+        id: image-tag
+        run: |
+          # Tag com versão + branch + SHA para versionamento e rollback
+          VERSION="${{ steps.version.outputs.version }}"
+          BRANCH="${{ github.ref_name }}"
+          SHA="${{ github.sha }}"
+          IMAGE_TAG="${VERSION}-${BRANCH}-${SHA}"
+          FULL_IMAGE="${{ env.REGISTRY }}/${{ inputs.image_name }}:${IMAGE_TAG}"
+          
+          echo "tag=$IMAGE_TAG" >> $GITHUB_OUTPUT
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "full-image=$FULL_IMAGE" >> $GITHUB_OUTPUT
+          echo "Image tag: $IMAGE_TAG"
+          echo "Version: $VERSION"
+          echo "Full image: $FULL_IMAGE"
+
+      - name: Update Kubernetes manifest
+        run: |
+          MANIFEST_FILE="kubernetes-manifests/${{ inputs.manifest_path }}"
+          NAMESPACE="${{ steps.env.outputs.namespace }}"
+          
+          if [ ! -f "$MANIFEST_FILE" ]; then
+            echo "❌ Manifest not found at $MANIFEST_FILE"
+            echo "⚠️  Create the manifest first in the Kubernetes repository"
+            exit 1
+          fi
+          
+          # Backup original
+          cp "$MANIFEST_FILE" "${MANIFEST_FILE}.bak"
+          
+          # Atualizar image tag no manifest
+          if [[ "$OSTYPE" == "darwin"* ]]; then
+            # macOS
+            sed -i '' "s|image:.*${{ inputs.image_name }}.*|image: ${{ steps.image-tag.outputs.full-image }}|g" "$MANIFEST_FILE"
+            # Atualizar namespace
+            sed -i '' "s|namespace:.*|namespace: $NAMESPACE|g" "$MANIFEST_FILE"
+          else
+            # Linux
+            sed -i "s|image:.*${{ inputs.image_name }}.*|image: ${{ steps.image-tag.outputs.full-image }}|g" "$MANIFEST_FILE"
+            # Atualizar namespace
+            sed -i "s|namespace:.*|namespace: $NAMESPACE|g" "$MANIFEST_FILE"
+          fi
+          
+          echo "✅ Manifest updated:"
+          echo "   Image: ${{ steps.image-tag.outputs.full-image }}"
+          echo "   Namespace: $NAMESPACE"
+          echo "📝 Changes:"
+          diff "${MANIFEST_FILE}.bak" "$MANIFEST_FILE" || true
+
+      - name: Commit and push manifest changes
+        working-directory: kubernetes-manifests
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          
+          MANIFEST_FILE="${{ inputs.manifest_path }}"
+          
+          # Verificar se há mudanças
+          if git diff --quiet "$MANIFEST_FILE"; then
+            echo "ℹ️ No changes to commit"
+            exit 0
+          fi
+          
+          git add "$MANIFEST_FILE"
+          git commit -m "chore: deploy ${{ inputs.image_name }} v${{ steps.version.outputs.version }} (${{ steps.image-tag.outputs.tag }}) [skip ci]"
+          
+          # Push para o repositório de Kubernetes
+          git remote set-url origin https://${{ secrets.KUBERNETES_REPO_TOKEN }}@github.com/${{ inputs.kubernetes_repo }}.git
+          git push origin HEAD:${{ github.ref_name }}
+          
+          echo "✅ Manifest committed and pushed to Kubernetes repository"
+
+      - name: Summary
+        run: |
+          echo "## 🚀 Deploy Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Version:** \`${{ steps.version.outputs.version }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Branch:** \`${{ github.ref_name }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Environment:** \`${{ steps.env.outputs.environment }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Namespace:** \`${{ steps.env.outputs.namespace }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Image:** \`${{ steps.image-tag.outputs.full-image }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Manifest:** \`${{ inputs.manifest_path }}\` (in Kubernetes repo)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "✅ Argo CD will automatically deploy this image to the \`${{ steps.env.outputs.namespace }}\` namespace" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "🔄 **Rollback:** Revert commit in Kubernetes repository" >> $GITHUB_STEP_SUMMARY
