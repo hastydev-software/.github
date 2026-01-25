@@ -17,7 +17,7 @@ on:
         type: string
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.repository }}-${{ inputs.image_name }}-${{ github.ref }}
+  group: deploy-${{ github.repository }}-${{ inputs.image_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 env:

@@ -6,7 +6,7 @@ on:
     branches: [ master ]
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.repository }}-${{ github.ref }}
+  group: e2e-${{ github.repository }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
