@@ -65,6 +65,19 @@ jobs:
           username: ${{ secrets.HARBOR_USERNAME }}
           password: ${{ secrets.HARBOR_PASSWORD }}
 
+      - name: Create .npmrc for private registry
+        run: |
+          if [ -f ".npmrc" ]; then
+            echo "✅ .npmrc already exists"
+          else
+            echo "📝 Creating .npmrc for private npm registry"
+            echo "strict-ssl=true" > .npmrc
+            echo "@hastydev:registry=https://npm.hastydev.com.br/" >> .npmrc
+            echo "//npm.hastydev.com.br/:_authToken=${{ secrets.NPM_REGISTRY_TOKEN }}" >> .npmrc
+            echo "✅ .npmrc created"
+          fi
+          cat .npmrc | sed 's/:_authToken=.*/:_authToken=***/' || true
+
       - name: Get version from package.json
         id: version
         run: |
