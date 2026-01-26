@@ -36,14 +36,45 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Determine Kubernetes branch
+        id: k8s-branch
+        run: |
+          # Determina qual branch usar no repositório de Kubernetes
+          APP_BRANCH="${{ github.ref_name }}"
+          if [[ "$APP_BRANCH" == "main" ]] || [[ "$APP_BRANCH" == "master" ]]; then
+            K8S_BRANCH="main"
+          elif [[ "$APP_BRANCH" == "staging" ]]; then
+            K8S_BRANCH="staging"
+          else
+            # Para outras branches, usar staging como fallback
+            K8S_BRANCH="staging"
+          fi
+          echo "branch=$K8S_BRANCH" >> $GITHUB_OUTPUT
+          echo "📦 Kubernetes branch: $K8S_BRANCH"
+          echo "📦 App branch: $APP_BRANCH"
+
+      - name: Verify Kubernetes branch exists
+        run: |
+          K8S_BRANCH="${{ steps.k8s-branch.outputs.branch }}"
+          echo "🔍 Verificando se branch $K8S_BRANCH existe no repositório..."
+          
+          # Verificar se a branch existe remotamente
+          git ls-remote --heads https://${{ secrets.KUBERNETES_REPO_TOKEN }}@github.com/${{ inputs.kubernetes_repo }}.git "$K8S_BRANCH" || {
+            echo "⚠️ Branch $K8S_BRANCH não encontrada, listando branches disponíveis:"
+            git ls-remote --heads https://${{ secrets.KUBERNETES_REPO_TOKEN }}@github.com/${{ inputs.kubernetes_repo }}.git | head -10
+            exit 1
+          }
+          echo "✅ Branch $K8S_BRANCH encontrada"
+
       - name: Checkout Kubernetes manifests repository
         uses: actions/checkout@v4
         with:
           repository: ${{ inputs.kubernetes_repo }}
           path: kubernetes-manifests
           token: ${{ secrets.KUBERNETES_REPO_TOKEN }}
-          ref: ${{ github.ref_name }}
+          ref: ${{ steps.k8s-branch.outputs.branch }}
           fetch-depth: 0
+          persist-credentials: true
 
       - name: Diagnose Docker permissions
         run: |
@@ -194,9 +225,9 @@ jobs:
           git add "$MANIFEST_FILE"
           git commit -m "chore: deploy ${{ inputs.image_name }} v${{ steps.version.outputs.version }} (${{ steps.image-tag.outputs.tag }}) [skip ci]"
           
-          # Push para o repositório de Kubernetes
+          # Push para o repositório de Kubernetes (usar a branch determinada)
           git remote set-url origin https://${{ secrets.KUBERNETES_REPO_TOKEN }}@github.com/${{ inputs.kubernetes_repo }}.git
-          git push origin HEAD:${{ github.ref_name }}
+          git push origin HEAD:${{ steps.k8s-branch.outputs.branch }}
           
           echo "✅ Manifest committed and pushed to Kubernetes repository"
 
