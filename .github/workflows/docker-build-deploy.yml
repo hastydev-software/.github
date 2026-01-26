@@ -56,15 +56,24 @@ jobs:
       - name: Verify Kubernetes branch exists
         run: |
           K8S_BRANCH="${{ steps.k8s-branch.outputs.branch }}"
-          echo "🔍 Verificando se branch $K8S_BRANCH existe no repositório..."
+          REPO="${{ inputs.kubernetes_repo }}"
+          echo "🔍 Verificando se branch $K8S_BRANCH existe no repositório $REPO..."
           
-          # Verificar se a branch existe remotamente
-          git ls-remote --heads https://${{ secrets.KUBERNETES_REPO_TOKEN }}@github.com/${{ inputs.kubernetes_repo }}.git "$K8S_BRANCH" || {
-            echo "⚠️ Branch $K8S_BRANCH não encontrada, listando branches disponíveis:"
-            git ls-remote --heads https://${{ secrets.KUBERNETES_REPO_TOKEN }}@github.com/${{ inputs.kubernetes_repo }}.git | head -10
+          # Listar todas as branches disponíveis
+          echo "📋 Branches disponíveis no repositório $REPO:"
+          git ls-remote --heads https://${{ secrets.KUBERNETES_REPO_TOKEN }}@github.com/$REPO.git | head -20
+          
+          # Verificar se a branch específica existe
+          if git ls-remote --heads https://${{ secrets.KUBERNETES_REPO_TOKEN }}@github.com/$REPO.git "$K8S_BRANCH" | grep -q "$K8S_BRANCH"; then
+            echo "✅ Branch $K8S_BRANCH encontrada no repositório $REPO"
+          else
+            echo "❌ Branch $K8S_BRANCH NÃO encontrada no repositório $REPO"
+            echo "⚠️ Você precisa criar a branch $K8S_BRANCH no repositório $REPO"
+            echo "💡 Execute no repositório hastydev-kubernetes:"
+            echo "   git checkout -b staging"
+            echo "   git push origin staging"
             exit 1
-          }
-          echo "✅ Branch $K8S_BRANCH encontrada"
+          fi
 
       - name: Checkout Kubernetes manifests repository
         uses: actions/checkout@v4
