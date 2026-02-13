@@ -157,18 +157,26 @@ jobs:
             exit 1
           fi
           
+          # Extrair o nome base da imagem (remover sufixos -staging ou -production)
+          BASE_IMAGE_NAME="${{ inputs.image_name }}"
+          BASE_IMAGE_NAME="${BASE_IMAGE_NAME%-staging}"
+          BASE_IMAGE_NAME="${BASE_IMAGE_NAME%-production}"
+          
+          echo "🔍 Looking for image pattern: $BASE_IMAGE_NAME"
+          echo "🎯 Will replace with: ${{ steps.image-tag.outputs.full-image }}"
+          
           # Backup original
           cp "$MANIFEST_FILE" "${MANIFEST_FILE}.bak"
           
-          # Atualizar image tag no manifest
+          # Atualizar image tag no manifest usando o nome base (sem sufixo de ambiente)
           if [[ "$OSTYPE" == "darwin"* ]]; then
             # macOS
-            sed -i '' "s|image:.*${{ inputs.image_name }}.*|image: ${{ steps.image-tag.outputs.full-image }}|g" "$MANIFEST_FILE"
+            sed -i '' "s|image: ${{ env.REGISTRY }}/${BASE_IMAGE_NAME}:.*|image: ${{ steps.image-tag.outputs.full-image }}|g" "$MANIFEST_FILE"
             # Atualizar namespace
             sed -i '' "s|namespace:.*|namespace: $NAMESPACE|g" "$MANIFEST_FILE"
           else
             # Linux
-            sed -i "s|image:.*${{ inputs.image_name }}.*|image: ${{ steps.image-tag.outputs.full-image }}|g" "$MANIFEST_FILE"
+            sed -i "s|image: ${{ env.REGISTRY }}/${BASE_IMAGE_NAME}:.*|image: ${{ steps.image-tag.outputs.full-image }}|g" "$MANIFEST_FILE"
             # Atualizar namespace
             sed -i "s|namespace:.*|namespace: $NAMESPACE|g" "$MANIFEST_FILE"
           fi
