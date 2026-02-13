@@ -64,6 +64,17 @@ jobs:
         with:
           driver: docker-container
 
+      - name: Set up Kustomize
+        run: |
+          if ! command -v kustomize &> /dev/null; then
+            echo "📦 Installing Kustomize..."
+            curl -s "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh" | bash
+            sudo mv kustomize /usr/local/bin/
+            echo "✅ Kustomize installed"
+          else
+            echo "✅ Kustomize already available: $(kustomize version)"
+          fi
+
       - name: Log in to Harbor
         uses: docker/login-action@v3
         with:
@@ -162,27 +173,46 @@ jobs:
           BASE_IMAGE_NAME="${BASE_IMAGE_NAME%-staging}"
           BASE_IMAGE_NAME="${BASE_IMAGE_NAME%-production}"
           
+          IMAGE_TAG="${{ steps.image-tag.outputs.tag }}"
+          
           echo "🔍 Looking for image pattern: $BASE_IMAGE_NAME"
-          echo "🎯 Will replace with: ${{ steps.image-tag.outputs.full-image }}"
+          echo "🎯 Will update tag to: $IMAGE_TAG"
           
           # Backup original
           cp "$MANIFEST_FILE" "${MANIFEST_FILE}.bak"
           
-          # Atualizar image tag no manifest usando o nome base (sem sufixo de ambiente)
-          if [[ "$OSTYPE" == "darwin"* ]]; then
-            # macOS
-            sed -i '' "s|image: ${{ env.REGISTRY }}/${BASE_IMAGE_NAME}:.*|image: ${{ steps.image-tag.outputs.full-image }}|g" "$MANIFEST_FILE"
-            # Atualizar namespace
-            sed -i '' "s|namespace:.*|namespace: $NAMESPACE|g" "$MANIFEST_FILE"
+          # Check if this is a kustomization.yaml file
+          if [[ "$(basename $MANIFEST_FILE)" == "kustomization.yaml" ]] || [[ "$(basename $MANIFEST_FILE)" == "kustomization.yml" ]]; then
+            echo "📦 Detected Kustomization file - using kustomize edit"
+            
+            # Navigate to the directory containing the kustomization file
+            MANIFEST_DIR=$(dirname "$MANIFEST_FILE")
+            cd "$MANIFEST_DIR"
+            
+            # Update the image tag using kustomize edit set image
+            # The format is: kustomize edit set image <image_name>=<new_name>:<new_tag>
+            # We need to match the original image name in the kustomization file
+            kustomize edit set image "${{ env.REGISTRY }}/${BASE_IMAGE_NAME}=${{ env.REGISTRY }}/${{ inputs.image_name }}:${IMAGE_TAG}"
+            
+            echo "✅ Kustomization updated using kustomize edit"
           else
-            # Linux
-            sed -i "s|image: ${{ env.REGISTRY }}/${BASE_IMAGE_NAME}:.*|image: ${{ steps.image-tag.outputs.full-image }}|g" "$MANIFEST_FILE"
-            # Atualizar namespace
-            sed -i "s|namespace:.*|namespace: $NAMESPACE|g" "$MANIFEST_FILE"
+            echo "📝 Regular manifest file - using sed"
+            # Atualizar image tag no manifest usando o nome base (sem sufixo de ambiente)
+            if [[ "$OSTYPE" == "darwin"* ]]; then
+              # macOS
+              sed -i '' "s|image: ${{ env.REGISTRY }}/${BASE_IMAGE_NAME}:.*|image: ${{ env.REGISTRY }}/${{ inputs.image_name }}:${IMAGE_TAG}|g" "$MANIFEST_FILE"
+              # Atualizar namespace
+              sed -i '' "s|namespace:.*|namespace: $NAMESPACE|g" "$MANIFEST_FILE"
+            else
+              # Linux
+              sed -i "s|image: ${{ env.REGISTRY }}/${BASE_IMAGE_NAME}:.*|image: ${{ env.REGISTRY }}/${{ inputs.image_name }}:${IMAGE_TAG}|g" "$MANIFEST_FILE"
+              # Atualizar namespace
+              sed -i "s|namespace:.*|namespace: $NAMESPACE|g" "$MANIFEST_FILE"
+            fi
           fi
           
           echo "✅ Manifest updated:"
-          echo "   Image: ${{ steps.image-tag.outputs.full-image }}"
+          echo "   Image: ${{ env.REGISTRY }}/${{ inputs.image_name }}:${IMAGE_TAG}"
           echo "   Namespace: $NAMESPACE"
           echo "📝 Changes:"
           diff "${MANIFEST_FILE}.bak" "$MANIFEST_FILE" || true
