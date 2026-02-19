@@ -15,6 +15,16 @@ on:
         description: 'Caminho do manifest dentro do repositório de Kubernetes'
         required: true
         type: string
+      vault_path:
+        description: 'Caminho do secret no Vault (ex: secret/data/staging/alfred-p2p)'
+        required: false
+        type: string
+        default: ''
+      vault_build_arg_keys:
+        description: 'Chaves do Vault para buscar e passar como Docker build args (uma por linha)'
+        required: false
+        type: string
+        default: ''
 
 concurrency:
   group: deploy-${{ github.repository }}-${{ inputs.image_name }}-${{ github.ref }}
@@ -29,6 +39,7 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
+      id-token: write
     
     steps:
       - name: Checkout application code
@@ -113,6 +124,50 @@ jobs:
             type=raw,value=${{ steps.version.outputs.version }}
             type=raw,value=latest,enable={{is_default_branch}}
 
+      - name: Prepare Vault secrets mapping
+        if: inputs.vault_path != '' && inputs.vault_build_arg_keys != ''
+        id: vault-mapping
+        run: |
+          SECRETS=""
+          while IFS= read -r key; do
+            key=$(echo "$key" | xargs)
+            [ -z "$key" ] && continue
+            SECRETS="${SECRETS}${{ inputs.vault_path }} ${key} | ${key} ;"$'\n'
+          done <<< "${{ inputs.vault_build_arg_keys }}"
+          echo "mapping<<EOF" >> $GITHUB_OUTPUT
+          echo "$SECRETS" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+          echo "🔑 Vault secrets mapping prepared"
+
+      - name: Fetch secrets from Vault
+        if: inputs.vault_path != '' && inputs.vault_build_arg_keys != ''
+        id: vault-secrets
+        uses: hashicorp/vault-action@v3
+        with:
+          url: ${{ secrets.VAULT_ADDR }}
+          method: jwt
+          role: ${{ secrets.VAULT_ROLE }}
+          jwtGithubAudience: ${{ secrets.VAULT_ADDR }}
+          secrets: ${{ steps.vault-mapping.outputs.mapping }}
+
+      - name: Prepare Docker build args from Vault
+        if: inputs.vault_path != '' && inputs.vault_build_arg_keys != ''
+        id: vault-build-args
+        run: |
+          BUILD_ARGS=""
+          while IFS= read -r key; do
+            key=$(echo "$key" | xargs)
+            [ -z "$key" ] && continue
+            VALUE="${!key}"
+            BUILD_ARGS="${BUILD_ARGS}${key}=${VALUE}"$'\n'
+          done <<< "${{ inputs.vault_build_arg_keys }}"
+          {
+            echo "args<<EOF"
+            echo "$BUILD_ARGS"
+            echo "EOF"
+          } >> $GITHUB_OUTPUT
+          echo "✅ Docker build args prepared from Vault secrets"
+
       - name: Build and push
         uses: docker/build-push-action@v5
         with:
@@ -121,6 +176,7 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: ${{ steps.vault-build-args.outputs.args }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
