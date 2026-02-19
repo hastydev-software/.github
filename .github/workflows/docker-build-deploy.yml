@@ -139,6 +139,33 @@ jobs:
           echo "EOF" >> $GITHUB_OUTPUT
           echo "🔑 Vault secrets mapping prepared"
 
+      - name: Debug GitHub OIDC token claims
+        if: inputs.vault_path != '' && inputs.vault_build_arg_keys != ''
+        run: |
+          echo "🔍 Fetching GitHub OIDC token to inspect claims..."
+          OIDC_TOKEN=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=${{ secrets.VAULT_ADDR }}" | jq -r '.value')
+          # Decode payload (middle part) without verifying signature
+          PAYLOAD=$(echo "$OIDC_TOKEN" | cut -d'.' -f2 | base64 -d 2>/dev/null || \
+                    echo "$OIDC_TOKEN" | cut -d'.' -f2 | python3 -c "import sys,base64; d=sys.stdin.read().strip(); print(base64.b64decode(d + '=='*(4-len(d)%4)).decode())")
+          echo "📋 Token claims:"
+          echo "$PAYLOAD" | jq '{
+            iss,
+            aud,
+            repository,
+            repository_owner,
+            workflow_ref,
+            job_workflow_ref,
+            ref,
+            sub
+          }'
+          echo ""
+          echo "ℹ️  Vault role must have:"
+          echo "   bound_audiences matching: $(echo "$PAYLOAD" | jq -r '.aud')"
+          echo "   bound_claims.repository matching: $(echo "$PAYLOAD" | jq -r '.repository')"
+          echo "   bound_claims.repository_owner (optional): $(echo "$PAYLOAD" | jq -r '.repository_owner')"
+          echo "   VAULT_ROLE secret value: ${{ secrets.VAULT_ROLE }}"
+
       - name: Fetch secrets from Vault
         if: inputs.vault_path != '' && inputs.vault_build_arg_keys != ''
         id: vault-secrets
