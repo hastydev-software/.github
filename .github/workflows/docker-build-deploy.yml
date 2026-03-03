@@ -308,13 +308,14 @@ jobs:
           
           MANIFEST_FILE="${{ inputs.manifest_path }}"
           
-          # Verificar se há mudanças
-          #if git diff --quiet "$MANIFEST_FILE"; then
-          #  echo "ℹ️ No changes to commit"
-          #  exit 0
-          #fi
-          
           git add "$MANIFEST_FILE"
+
+          # Verificar se há mudanças staged (imagem já pode estar atualizada)
+          if git diff --cached --quiet; then
+            echo "ℹ️ No changes to commit — manifest already points to this image"
+            exit 0
+          fi
+
           git commit -m "chore: deploy ${{ inputs.image_name }} v${{ steps.version.outputs.version }} (${{ steps.image-tag.outputs.tag }}) [skip ci]"
           
           # Push para o repositório de Kubernetes (sempre main - GitOps)
