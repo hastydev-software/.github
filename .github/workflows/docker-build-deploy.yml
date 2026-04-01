@@ -25,6 +25,11 @@ on:
         required: false
         type: string
         default: ''
+      no_cache:
+        description: 'Disable Docker layer cache (use to force a full rebuild)'
+        required: false
+        type: boolean
+        default: false
 
 concurrency:
   group: deploy-${{ github.repository }}-${{ inputs.image_name }}-${{ github.ref }}
@@ -204,8 +209,9 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: ${{ steps.vault-build-args.outputs.args }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          no-cache: ${{ inputs.no_cache }}
+          cache-from: ${{ inputs.no_cache && '' || 'type=gha' }}
+          cache-to: ${{ inputs.no_cache && '' || 'type=gha,mode=max' }}
 
       - name: Determine environment
         id: env
