@@ -326,6 +326,10 @@ jobs:
           
           # Push para o repositório de Kubernetes (sempre main - GitOps)
           git remote set-url origin https://${{ secrets.KUBERNETES_REPO_TOKEN }}@github.com/${{ inputs.kubernetes_repo }}.git
+
+          # Rebase onto latest remote main to handle concurrent pushes from other repos
+          git pull --rebase origin main
+
           git push origin HEAD:main
           
           echo "✅ Manifest committed and pushed to Kubernetes repository"
